@@ -8,7 +8,7 @@ Depth recurrence (weight-shared looping) has been attempted 15+ times in this co
 
 ### 1a. Quantization Error Amplification
 
-When the same weight matrix $W$ is applied $k$ times in a forward pass, post-training quantization error $\epsilon$ from int8 rounding compounds across iterations. PR #363 measured ~900× amplification over 3 cycles. PR #579 confirmed empirically: "2 loops survive, 3+ catastrophic (+4.3 BPB)." PR #623 showed AWQ (activation-aware quantization) closes 63% of the gap but cannot eliminate compounding.
+When the same weight matrix $W$ is applied $k$ times in a forward pass, post-training quantization error $\epsilon$ from int8 rounding compounds across iterations. PR #363 measured ~900× amplification over 3 cycles.
 
 GPTQ quantizes layer-by-layer, compensating downstream weights for each layer's rounding error (Frantar et al., 2023, §3). With shared weights, this compensation is impossible. The same quantized matrix must serve all iterations. Errors from early iterations propagate uncompensated through later ones.
 
@@ -16,7 +16,7 @@ GPTQ quantizes layer-by-layer, compensating downstream weights for each layer's 
 
 ### 1b. Per-Iteration Identity Collapse
 
-Shared weights produce identical transformations for identical inputs. Without per-iteration conditioning, all loop iterations compute the same function. This collapses depth recurrence to a single effective pass. PR #319 showed learned gating parameters collapse to identity. PR #484 found attention layers need per-iteration identity more than MLP.
+Shared weights produce identical transformations for identical inputs. Without per-iteration conditioning, all loop iterations compute the same function. This collapses depth recurrence to a single effective pass.
 
 Dehghani et al. (2019, §2.1) addressed this with sinusoidal timestep embeddings added at each recurrence step. Xu & Sato (2025) formalized the limitation: without timestep encoding, looped transformers have strict approximation rate bounds (Lemma 4.1).
 
@@ -70,14 +70,14 @@ This follows the HC → mHC → mHC-lite simplification chain. mHC (Xie et al., 
 
 **Surprising finding.** Timestep scaling has near-zero effect on pre-quantization BPB (Run H vs I: 1.2578 vs 1.2580) but reduces quantization gap by 26–30% (H vs I: +0.0126 → +0.0088; J vs K: +0.0103 → +0.0076). The mechanism: capped gammas are stored as float16 passthrough parameters that bypass int8 quantization entirely. They provide per-iteration specialization that survives the quantization pipeline. In short, timestep scaling helps quantization, not training.
 
-**Result.** Run K (best): post-quant 1.2659 BPB, Q-gap +0.0076 — vs prior results showing catastrophic failure at 3+ loops (PR #579, +4.3 BPB).
+**Result.** Run K (best): post-quant 1.2659 BPB, Q-gap +0.0076 — vs prior 3-loop attempts that failed catastrophically (PR #363 measured ~900× quantization amplification over 3 cycles).
 
 > Xu, K. & Sato, I. (2025). "On Expressive Power of Looped Transformers: Theoretical Analysis and Enhancement via Timestep Encoding." ICML 2025. [arXiv:2410.01405](https://arxiv.org/abs/2410.01405)
 > Perez, E., Strub, F., de Vries, H., Dumoulin, V. & Courville, A. (2018). "FiLM: Visual Reasoning with a General Conditioning Layer." AAAI 2018. [arXiv:1709.07871](https://arxiv.org/abs/1709.07871)
 
 ## 5. Supporting Technique: Prelude-Recurrent-Coda Architecture
 
-First and last transformer layers perform fundamentally different functions — input encoding and output prediction — compared to middle layers that do iterative refinement. Forcing boundary layers into shared weights compromises both functions. Geiping et al. (2025) demonstrated this at scale with Huginn 3.5B: 2 prelude + 4 shared (×32 loops) + 2 coda layers, achieving 132 effective depth from 3.5B parameters. In this competition, PR #575 independently explored prefix + 2 tied (×3) + suffix.
+First and last transformer layers perform fundamentally different functions — input encoding and output prediction — compared to middle layers that do iterative refinement. Forcing boundary layers into shared weights compromises both functions. Geiping et al. (2025) demonstrated this at scale with Huginn 3.5B: 2 prelude + 4 shared (×32 loops) + 2 coda layers, achieving 132 effective depth from 3.5B parameters.
 
 **Result.** Run E (1+3×2+1, all fixes) vs Run D (4×2, all fixes): −0.016 BPB — the largest single architectural improvement in the ablation. Boundary layers need unique parameters.
 

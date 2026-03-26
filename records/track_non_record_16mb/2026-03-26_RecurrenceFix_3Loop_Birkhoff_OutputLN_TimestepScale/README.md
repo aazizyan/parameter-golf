@@ -2,14 +2,14 @@
 
 ## Result
 
-**1.2659 BPB** post-quantization (10.7 MB model + 57KB code). Config: 1 prelude + 4 shared × 3 loops + 1 coda = **14 effective layers from 6 unique blocks**. Q-gap +0.0076. Depth recurrence at 3 loops has never worked in this competition — prior attempts produced +4.3 BPB blowup (PR #579). This submission brings Q-gap down to +0.0076 using three new techniques.
+**1.2659 BPB** post-quantization (10.7 MB model + 57KB code). Config: 1 prelude + 4 shared × 3 loops + 1 coda = **14 effective layers from 6 unique blocks**. Q-gap +0.0076. Depth recurrence at 3 loops has never worked in this competition — prior 3-loop attempts failed catastrophically (PR #363 measured ~900× quantization amplification over 3 cycles). This submission brings Q-gap down to +0.0076 using three new techniques.
 
 ## Technique Summary
 
 | Technique | What it does | Delta | Verdict |
 |-----------|-------------|-------|---------|
 | **Output-LN** | Moves RMSNorm from MLP input to output, letting shared weights see different magnitudes per iteration | −0.007 BPB (screening) | Critical — nothing works without it |
-| **Birkhoff mixing** | Constrains residual mixing to convex combination (spectral norm ≤ 1), preventing signal blowup across loops | Enables 3-loop stability (Q-gap +0.0076 vs prior +4.3 BPB blowup) | Required for 3-loop stability, but hurts alone |
+| **Birkhoff mixing** | Constrains residual mixing to convex combination (spectral norm ≤ 1), preventing signal blowup across loops | Enables 3-loop stability (Q-gap +0.0076 vs prior catastrophic 3-loop failure) | Required for 3-loop stability, but hurts alone |
 | **Timestep scaling** | Per-iteration learned scale vectors (capped ±4.0), stored as float16 passthrough | Q-gap −26–30% | Helps quantization, not training |
 | **Prelude-coda** | Unique first/last layers, shared middle blocks (Huginn-style) | −0.016 BPB (screening) | Biggest single BPB win |
 | **LeakyReLU(0.5)²** | Preserves negative signal through quadratic activation | Adopted from SOTA | Necessary with Output-LN to avoid dead neurons |
@@ -21,7 +21,7 @@
 - **Q-gap scales with training duration.** Screening (2000 steps) shows Q-gap +0.0019. Full-scale (10k steps) shows +0.0076–0.0126. Screening underestimates the quantization problem by 4–7×.
 - **Output-LN is the critical technique.** Without it, mixing alphas collapse to ~0.48 (uniform) and MLP scale drops to 0.2–0.3. With it, alphas learn a meaningful gradient (0.37→0.70 across layers).
 - **Prelude-coda gives the biggest single improvement** (−0.016 BPB at screening). Boundary layers need unique parameters.
-- **3 loops are viable for the first time.** Q-gap +0.0076 at 3 loops, vs prior results showing catastrophic failure (+4.3 BPB, PR #579).
+- **3 loops are viable for the first time.** Q-gap +0.0076 at 3 loops, vs prior 3-loop attempts that failed catastrophically (PR #363 measured ~900× quantization amplification over 3 cycles).
 
 ## Techniques Applicable to Non-Recurrent Submissions
 
