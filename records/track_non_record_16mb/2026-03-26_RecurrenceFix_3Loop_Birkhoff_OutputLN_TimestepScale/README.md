@@ -13,6 +13,7 @@
 | **Timestep scaling** | Per-iteration learned scale vectors (capped ±4.0), stored as float16 passthrough | Q-gap −26–30% | Helps quantization, not training |
 | **Prelude-coda** | Unique first/last layers, shared middle blocks (Huginn-style) | −0.016 BPB (screening) | Biggest single BPB win |
 | **LeakyReLU(0.5)²** | Preserves negative signal through quadratic activation | Adopted from SOTA | Necessary with Output-LN to avoid dead neurons |
+| **FiLM bias** | Per-iteration shift vectors (β), completing scale+shift FiLM conditioning | −0.003 BPB | Clean free win, additive with gammas |
 
 ## Key Findings
 
@@ -22,6 +23,9 @@
 - **Output-LN is the critical technique.** Without it, mixing alphas collapse to ~0.48 (uniform) and MLP scale drops to 0.2–0.3. With it, alphas learn a meaningful gradient (0.37→0.70 across layers).
 - **Prelude-coda gives the biggest single improvement** (−0.016 BPB at screening). Boundary layers need unique parameters.
 - **3 loops are viable for the first time.** Q-gap +0.0076 at 3 loops, vs prior 3-loop attempts that failed catastrophically (PR #363 measured ~900× quantization amplification over 3 cycles).
+- **Attention-only sharing (shared attention, unique MLPs per iteration) gives −0.026 post-Q BPB** — the largest improvement found — but costs +3.9MB artifact (14.65MB total), leaving insufficient room for SOTA features.
+- **FiLM bias adds −0.003 BPB at both 2 and 3 loops** with zero artifact/throughput cost. Additive with timestep scaling gammas.
+- **ALBERT (Lan et al., 2020) found attention sharing is nearly free while FFN sharing causes most degradation.** s3_L confirms: the model needs per-iteration MLP differentiation, not per-iteration attention differentiation.
 
 ## Techniques Applicable to Non-Recurrent Submissions
 
@@ -47,6 +51,22 @@ Output-LN could benefit any submission using quadratic activations (relu², leak
 | J | 1+4×3+1 peri+birk (3 loops) | 14 | 1.2567 | 1.2670 | +0.0103 |
 | **K** | **1+4×3+1 peri+birk+ts(cap4)** | **14** | **1.2583** | **1.2659** | **+0.0076** |
 
+## Series 3: Follow-up Ablations (600s, 8×H100)
+
+| Run | Config | Eff. Layers | Pre-Q BPB | Post-Q BPB | Q-Gap |
+|-----|--------|-------------|-----------|------------|-------|
+| L | 1+4×2+1 shared-attn + unique MLPs | 10 | 1.2333 | 1.2406 | +0.0073 |
+| N | 1+4×2+1 full share + FiLM bias | 10 | 1.2555 | 1.2641 | +0.0086 |
+| O | 1+4×3+1 full share + FiLM bias | 14 | 1.2547 | 1.2625 | +0.0078 |
+
+Run M (1+4×3+1 attn-only, 3 loops) crashed during torch.compile with 12 UniqueMLP modules. Works without compile (verified via smoke test).
+
+## Next Direction
+
+Run s3_L validated that per-iteration MLP differentiation is critical (−0.026 BPB), but unique MLPs per loop iteration are too expensive: 12 unique MLP modules add ~4MB to the artifact (14.65MB total), leaving only ~1.35MB headroom — insufficient for integrating SOTA features. The 3-loop variant (s3_M) also crashes torch.compile(fullgraph=True).
+
+The planned approach achieves per-iteration differentiation at ~110KB instead of ~12MB: per-iteration **unique input norms** (24KB) control what the shared MLP sees at each iteration, **learned depth embeddings** (14KB) provide positional identity, and **FiLM gammas + betas** (28KB) modulate residual contributions — all stored as FP16 passthrough. This leaves ~4.8MB headroom for SOTA feature integration while preserving the per-iteration specialization that s3_L showed is essential.
+
 ## How to Reproduce
 
 The submitted run (Run K) from repo root:
@@ -69,6 +89,9 @@ bash scripts/run_screening.sh
 
 # Full-scale (5 runs, on 8×H100)
 bash scripts/run_fullscale.sh
+
+# Follow-up ablations (4 runs, on 8×H100)
+bash scripts/run_fullscale2.sh
 ```
 
 ### Environment Variables
@@ -86,13 +109,21 @@ bash scripts/run_fullscale.sh
 | `LEAKY_RELU_SLOPE` | 0.5 | Negative slope for leaky relu² (0.0 = relu²) |
 
 ## Files
+
 ```
 ├── train_gpt.py           # Modified training script
 ├── train_log.txt           # Run K log (primary submission)
 ├── submission.json         # Competition metadata
 ├── research_notes.md       # Theory + citations
-├── logs/                   # All 12 run logs (s1_Ap–F screening, s2_G–K full-scale)
-└── scripts/                # run_screening.sh, run_fullscale.sh
+├── ablation2_report.md     # Full comparison report (Series 1–3)
+├── logs/                   # All run logs
+│   ├── s1_Ap–F.txt         #   Screening (7 runs)
+│   ├── s2_G–K.txt          #   Full-scale (5 runs)
+│   └── s3_L–O.txt          #   Follow-up ablations (4 runs)
+└── scripts/
+    ├── run_screening.sh    # Series 1 screening
+    ├── run_fullscale.sh    # Series 2 full-scale
+    └── run_fullscale2.sh   # Series 3 follow-up ablations
 ```
 
 ## Links

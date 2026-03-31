@@ -108,3 +108,80 @@ Birkhoff alone hurts (C' > B'). Peri-norm is the main factor (C − C' = −0.00
 | **K** | **1+4×3+1 peri+birk+ts(cap4)** | **14** | **1.2583** | **1.2659** | **+0.0076** |
 
 **Headline result.** Run K achieves 14 effective layers from 6 unique blocks with Q-gap +0.0076. This is the first viable 3-loop depth recurrence in competition history, vs prior results showing catastrophic failure at 3+ loops. Timestep scaling reduces Q-gap by 26–30% on both 2-loop and 3-loop configurations. It helps quantization, not training.
+
+## 7. Technique 4: FiLM Bias (Per-Iteration Shift Vectors)
+
+**Problem.** Capped timestep scaling (§4) provides per-iteration scale vectors $\gamma^{(t)}$ but no shift. Standard FiLM conditioning (Perez et al., 2018) uses both scale and shift: $\text{FiLM}(x) = \gamma \odot x + \beta$. The missing $\beta$ limits per-iteration expressivity — scaling alone cannot shift the operating point of downstream layers.
+
+**Solution.** Add per-iteration bias vectors $\beta_{\text{attn}}^{(t)}, \beta_{\text{mlp}}^{(t)}$ alongside existing gammas. Initialized to zeros (no effect at initialization), not clamped (unlike gammas which are capped at ±4.0), stored as FP16 passthrough parameters that bypass int8 quantization. Parameter cost: $2 \times \text{eff\_layers} \times 512 \approx 8\text{KB}$ additional.
+
+**Result.** FiLM bias gives a consistent −0.003 post-Q BPB improvement at both loop counts:
+
+| Comparison | Without bias | With bias | Delta |
+|------------|-------------|-----------|-------|
+| 2 loops (s2_I vs s3_N) | 1.2668 | 1.2641 | −0.0027 |
+| 3 loops (s2_K vs s3_O) | 1.2659 | 1.2625 | −0.0034 |
+
+The effect is independent of loop count (~0.003 in both cases), confirming that bias provides additive benefit on top of gammas. No throughput penalty: step_avg is 42.48ms (s3_N) vs 41.92ms (s2_I) at 2 loops, and 58.18ms (s3_O) vs 59.28ms (s2_K) at 3 loops. Negligible artifact overhead (+0.03MB).
+
+> Perez, E., Strub, F., de Vries, H., Dumoulin, V. & Courville, A. (2018). "FiLM: Visual Reasoning with a General Conditioning Layer." AAAI 2018. [arXiv:1709.07871](https://arxiv.org/abs/1709.07871)
+
+## 8. Attention-Only Sharing: Validating Per-Iteration MLP Differentiation
+
+**Hypothesis.** If shared weights are the bottleneck, which component benefits more from being unique per iteration — attention or MLP? ALBERT (Lan et al., 2020, §4.4) found that sharing attention parameters across layers has negligible effect on downstream tasks, while sharing FFN parameters causes most of the degradation. This suggests that attention weights learn position-agnostic patterns, while FFN weights need layer-specific specialization.
+
+**Experiment.** s3_L uses attention-only sharing: 4 `SharedAttnLayer` modules (shared across loop iterations) paired with 8 `UniqueMLP` modules (one per virtual position per loop). This gives each iteration distinct feedforward capacity while reusing attention weights.
+
+**Result.** s3_L achieves **1.2406 post-Q BPB** — the best result in the entire ablation series — beating full sharing (s2_I: 1.2668) by −0.026 BPB. This is a massive improvement, larger than any other single technique.
+
+| Metric | s2_I (full share) | s3_L (attn-only share) | Delta |
+|--------|-------------------|------------------------|-------|
+| Post-Q BPB | 1.2668 | 1.2406 | −0.0262 |
+| Q-gap | 0.0088 | 0.0073 | −0.0015 |
+| Params | 11.55M | 15.75M | +4.20M |
+| Artifact | 10.77MB | 14.65MB | +3.88MB |
+| step_avg | 41.92ms | 42.60ms | +0.68ms |
+
+**Diagnostics confirm per-iteration specialization.** Unique MLPs develop aggressive per-position scales (148–260 range vs 157–177 for full sharing). Shared attention alphas differentiate more (0.45–0.78 vs 0.43–0.61), suggesting that unique MLPs enable the shared attention to learn more distinct mixing behaviors.
+
+**Abandoned.** Despite the BPB win, attention-only sharing is impractical for competition use:
+1. **Artifact cost:** 14.65MB leaves only ~1.35MB headroom — insufficient for integrating SOTA features.
+2. **torch.compile limitation:** The 3-loop variant (s3_M, 12 UniqueMLP modules) crashes `torch.compile(fullgraph=True)` during AOT autograd tracing with `RuntimeError: tensor does not have a device`. The 2-loop variant (8 modules) compiles fine. The model works without compile (verified via smoke test), but the throughput penalty (~3× slower) makes it uncompetitive.
+
+**Takeaway.** The concept — per-iteration MLP differentiation — is validated. The implementation — full unique MLP copies — is too expensive. A cheaper mechanism is needed.
+
+> Lan, Z., Chen, M., Goodman, S., Gimpel, K., Sharma, P. & Soricut, R. (2020). "ALBERT: A Lite BERT for Self-supervised Learning of Language Representations." ICLR 2020. [arXiv:1909.11942](https://arxiv.org/abs/1909.11942)
+
+## 9. Toward Cheap Per-Iteration Specialization
+
+s3_L proved that per-iteration MLP differentiation is essential (−0.026 BPB). But unique MLPs cost ~4MB in artifact size. The question is: can we achieve most of the differentiation at a fraction of the parameter cost?
+
+### Key insight: control the input, not the weights
+
+A unique MLP per iteration gives each loop a distinct feedforward function $f_v(x)$. But the same effect can be approximated by giving the shared MLP a distinct *input* per iteration: $f(\text{transform}_v(x))$. If the per-iteration transform is cheap, the total parameter cost drops dramatically.
+
+### Evidence from literature
+
+**MoEUT** (Csordás et al., 2024, §2.4): For Mixture-of-Experts Universal Transformers, "peri-layernorm" (normalization placement around sub-layers) is critical for competitive performance. The paper finds that normalization controls what the shared weights see, which is more important than the weights themselves being unique. This aligns with the Output-LN finding (§3): normalization placement is the key lever for recurrence.
+
+**BitFit** (Ben-Zaken et al., 2022, §3): When fine-tuning BERT by training only bias terms, LayerNorm parameters change more than any other component — even more than attention or FFN biases. This suggests that normalization parameters have outsized influence on layer behavior, making them an efficient target for per-iteration specialization.
+
+**Relaxed Recursive Transformers** (Bae et al., 2025, §3.2): Per-iteration LoRA adapters on shared transformer weights recover 99.7% of non-shared performance at 1/3 the parameters. The paper demonstrates that low-rank per-iteration corrections are sufficient — full unique copies are overkill.
+
+### Planned parameter-efficient stack
+
+| Component | Per-iteration cost | Total (14 virtual positions) | Role |
+|-----------|-------------------|---------------------------|------|
+| Unique input norms (attn_in + mlp_in) | 2 × 512 = 1024 params | 14 × 2 × 512 = 14,336 params = 28KB FP16 | Control what shared weights see |
+| Depth embeddings | 512 params | 14 × 512 = 14KB FP16 | Positional identity per iteration |
+| Timestep gammas | 2 × 512 = 1024 params | 14 × 2 × 512 = 28KB FP16 | Per-iteration scale |
+| Timestep betas | 2 × 512 = 1024 params | 14 × 2 × 512 = 28KB FP16 | Per-iteration shift |
+| **Total** | | **~110KB FP16 passthrough** | |
+
+This leaves ~4.8MB headroom (from an estimated ~11.2MB artifact) for SOTA feature integration — vs only ~1.35MB with unique MLPs.
+
+**Depth embedding subsumes Q/K bias.** Adding a depth embedding $e_v$ to the input before attention: $W_q(x + e_v) = W_q \cdot x + W_q \cdot e_v$. The second term acts as a learned per-iteration query/key bias, providing positional differentiation within the attention mechanism without additional parameters beyond the embedding itself.
+
+> Csordás, R., Irie, K., Schmidhuber, J., Potts, C. & Manning, C. (2024). "MoEUT: Mixture-of-Experts Universal Transformers." NeurIPS 2024. [arXiv:2405.16039](https://arxiv.org/abs/2405.16039)
+> Ben-Zaken, E., Goldberg, Y. & Ravfogel, S. (2022). "BitFit: Simple Parameter-efficient Fine-tuning for Transformer-based Masked Language-models." ACL 2022. [arXiv:2106.10199](https://arxiv.org/abs/2106.10199)
+> Bae, S., Ko, J., Song, H. & Yun, S.-Y. (2025). "Relaxed Recursive Transformers: Effective Parameter Sharing with Layer-wise LoRA." ICLR 2025. [arXiv:2410.20672](https://arxiv.org/abs/2410.20672)
