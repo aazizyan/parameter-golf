@@ -12,7 +12,7 @@ PR #1518. The resulting 3-seed mean is 1.0788 BPB.
 
 ## 3-Seed Results
 
-| Seed | Sliding BPP | **TTT BPP** | Artifact |
+| Seed | Sliding BPB | **TTT BPB** | Artifact |
 |------|-------------|-------------|----------|
 | 42   | 1.0804      | **1.0787**  | 15,990,973 |
 | 2025 | 1.0804      | **1.0791**  | 15,989,784 |
@@ -20,7 +20,7 @@ PR #1518. The resulting 3-seed mean is 1.0788 BPB.
 | **Mean** | **1.0802** | **1.0788** | |
 | **Std** | **0.0003** | **0.0003** | |
 
-Base (PR #1493): **1.0810 BPP**. Delta: **-0.0022 BPP**. On the fixed FineWeb validation set, this corresponds to an approximate val_loss improvement of ~0.006 nats, above the leaderboard's stated 0.005-nat magnitude threshold.
+Base (PR #1493): **1.0810 BPB**. Delta: **-0.0022 BPB**. On the fixed FineWeb validation set, this corresponds to an approximate val_loss improvement of ~0.006 nats, above the leaderboard's stated 0.005-nat magnitude threshold.
 
 ## What's New vs PR #1493
 
@@ -62,7 +62,7 @@ failed or showed negligible effect. Documenting them here to save future effort.
 blend with `sigmoid(logit) * x + (1-sigmoid(logit)) * x0` to make the
 recurrence a contraction. Asymmetric init (entry alpha=0.984, mid=0.993,
 exit=0.997) biased toward re-injection at entry, preservation at exit. Looked
-promising in short ablations (-0.0002 to -0.0005 BPP at 2000 steps), but fell
+promising in short ablations (-0.0002 to -0.0005 BPB at 2000 steps), but fell
 apart at full scale — runs WITHOUT Birkhoff outperformed runs WITH it once
 trajectory readout was added. The contraction appeared to reduce state diversity across passes in our
 experiments, leaving less for the readout to recover. Code retained behind
@@ -81,7 +81,7 @@ identity when it's just an additive bias.
 
 **Controls-only TTT (from PR #1518).** Adapting only ~30K control parameters
 (skip_weights, attn_scale, mlp_scale, etc.) instead of all 35.9M. On this
-architecture it regressed by +0.00199 BPP, turning TTT's -0.0017 gain into a
+architecture it regressed by +0.00199 BPB, turning TTT's -0.0017 gain into a
 +0.002 loss. Full-param SGD remains necessary.
 
 **parallel_residual_start=8 (from PR #1518).** Neutral without their two-lane
@@ -180,7 +180,7 @@ Per Issue #1017 (Track B — legal eval-time adaptation):
 
 ## Credits
 
-- **PR #1493** (@bigbag) — base submission: SP8192 + 3-layer depth recurrence + parallel residuals + QK-Gain 5.25 + legal TTT (1.0810 BPP)
+- **PR #1493** (@bigbag) — base submission: SP8192 + 3-layer depth recurrence + parallel residuals + QK-Gain 5.25 + legal TTT (1.0810 BPB)
 - **PR #1518** (@abaybektursun) — MUON_MOMENTUM=0.98, GPTQ timing optimizations
 - **PR #1394** (@clarkkev) — SP8192 + GPTQ SDClip + MuonEq-R
 - **PR #1413** (@dexhunter) — legal TTT on SP8192
